@@ -7,15 +7,84 @@
 	</table>
 </fieldset>
 
+<fieldset class="cbi-section" id="_xlnetacc_captcha" style="display:none">
+	<legend><%:Login verification%></legend>
+	<div class="cbi-section-node">
+		<p><%:Thunder requires a graphical captcha. Enter the characters shown below to continue logging in.%></p>
+		<div style="margin:12px 0">
+			<img id="_captcha_image" alt="<%:Captcha%>" style="width:140px;height:56px;border:1px solid #ccc;vertical-align:middle" />
+			<button type="button" class="cbi-button" id="_captcha_refresh"><%:Reload image%></button>
+		</div>
+		<div>
+			<input type="text" id="_captcha_code" maxlength="8" autocomplete="off" placeholder="<%:Captcha%>" />
+			<button type="button" class="cbi-button cbi-button-apply" id="_captcha_submit"><%:Submit captcha%></button>
+			<span id="_captcha_message" style="margin-left:8px"></span>
+		</div>
+	</div>
+</fieldset>
+
 <script type="text/javascript">//<![CDATA[
 	var run_state = document.getElementById('_run_state');
 	var down_state = document.getElementById('_down_state');
 	var up_state = document.getElementById('_up_state');
+	var captcha_box = document.getElementById('_xlnetacc_captcha');
+	var captcha_image = document.getElementById('_captcha_image');
+	var captcha_code = document.getElementById('_captcha_code');
+	var captcha_submit = document.getElementById('_captcha_submit');
+	var captcha_message = document.getElementById('_captcha_message');
+	var captcha_url = '<%=luci.dispatcher.build_url("admin", "services", "xlnetacc", "captcha")%>';
+	var captcha_submit_url = '<%=luci.dispatcher.build_url("admin", "services", "xlnetacc", "captcha_submit")%>';
+	var captcha_id = null;
+
+	function refresh_captcha() {
+		captcha_image.src = captcha_url + '?_=' + (new Date().getTime());
+	}
+
+	document.getElementById('_captcha_refresh').onclick = refresh_captcha;
+	captcha_code.onkeydown = function(ev) {
+		ev = ev || window.event;
+		if ((ev.keyCode || ev.which) == 13) {
+			if (ev.preventDefault) ev.preventDefault();
+			captcha_submit.click();
+			return false;
+		}
+	};
+	captcha_submit.onclick = function() {
+		var code = captcha_code.value.replace(/^\s+|\s+$/g, '');
+		if (!/^[A-Za-z0-9]{4,8}$/.test(code)) {
+			captcha_message.innerHTML = '<%:Enter 4 to 8 letters or numbers.%>';
+			return;
+		}
+		captcha_submit.disabled = true;
+		captcha_message.innerHTML = '<%:Submitting...%>';
+		var captcha_xhr = new XHR();
+		captcha_xhr.post(captcha_submit_url, { code: code, token: '<%=token%>' }, function(x, data) {
+			captcha_submit.disabled = false;
+			if (!data && x && x.responseText) {
+				try { data = JSON.parse(x.responseText); } catch (e) { data = null; }
+			}
+			if (x && x.status >= 200 && x.status < 300) {
+				captcha_message.innerHTML = data && data.message ? data.message : '<%:Captcha submitted. Logging in...%>';
+				captcha_code.value = '';
+			} else {
+				captcha_message.innerHTML = data && data.message ? data.message : '<%:Unable to submit the captcha.%>';
+			}
+		});
+	};
 	XHR.poll(5, '<%=luci.dispatcher.build_url("admin", "services", "xlnetacc", "status")%>', null, function(x, status) {
 		if ( x && x.status == 200 ) {
 			run_state.innerHTML = status.run_state ? '<%:RUNNING%>' : '<%:NOT RUNNING%>';
 			down_state.innerHTML = status.down_state ? status.down_state : '<%:No upgrade information%>';
 			up_state.innerHTML = status.up_state ? status.up_state : '<%:No upgrade information%>';
+			captcha_box.style.display = status.captcha_pending ? '' : 'none';
+			if (status.captcha_pending && captcha_id !== status.captcha_id) {
+				captcha_id = status.captcha_id;
+				captcha_code.value = '';
+				captcha_message.innerHTML = '';
+				captcha_image.src = captcha_url + '?_=' + status.captcha_id;
+				captcha_code.focus();
+			}
+			if (!status.captcha_pending) captcha_id = null;
 		}
 	});
 //]]></script>

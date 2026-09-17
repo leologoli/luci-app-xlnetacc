@@ -28,6 +28,10 @@ http_args=
 user_agent=
 link_cn=
 lasterr=
+captcha_image_file=
+captcha_key_file=
+captcha_code_file=
+auth_file=
 sequence_xl=1000000
 sequence_down=$(( $(date +%s) / 6 ))
 sequence_up=$sequence_down
@@ -158,15 +162,115 @@ swjsq_json() {
 	json_add_string OSVersion "7.1.1"
 }
 
+# 清理验证码临时文件
+swjsq_clear_captcha() {
+	rm -f "$captcha_image_file" "$captcha_key_file" "$captcha_code_file" \
+		"${captcha_image_file}.new" "${captcha_key_file}.new" 2>/dev/null
+}
+
+# 获取图形验证码及其 VERIFY_KEY。文件仅保存在 /tmp，并由已认证的 LuCI 接口读取。
+swjsq_get_captcha() {
+	local verify_type=${1:-MEA}
+	local header_file="/tmp/xlnetacc_verify_headers.$$"
+	local wget_cmd="wget-ssl -nv -t 1 -T 10 --no-check-certificate"
+	[ -n "$_bind_ip" ] && wget_cmd="$wget_cmd --bind-address=$_bind_ip"
+
+	swjsq_clear_captcha
+	$wget_cmd -S -O "${captcha_image_file}.new" \
+		"https://verify2.xunlei.com/image?t=${verify_type}" 2> "$header_file"
+	local wget_ret=$?
+	local verify_key=$(grep -i 'Set-Cookie:.*VERIFY_KEY=' "$header_file" 2>/dev/null \
+		| tail -n 1 | sed -n 's/.*VERIFY_KEY=\([^;[:space:]]*\).*/\1/p')
+	rm -f "$header_file"
+
+	if [ $wget_ret -ne 0 -o ! -s "${captcha_image_file}.new" \
+		-o ${#verify_key} -ne 64 -o -n "${verify_key//[0-9A-Fa-f]/}" ]; then
+		_log "获取图形验证码失败，请稍后重试" $(( 1 | 8 | 32 ))
+		swjsq_clear_captcha
+		return 1
+	fi
+
+	echo -n "$verify_key" > "${captcha_key_file}.new"
+	chmod 600 "${captcha_image_file}.new" "${captcha_key_file}.new"
+	mv -f "${captcha_image_file}.new" "$captcha_image_file"
+	mv -f "${captcha_key_file}.new" "$captcha_key_file"
+	_log "需要输入图形验证码，请在迅雷快鸟设置页面完成验证" $(( 1 | 8 | 32 ))
+	return 0
+}
+
+# 等待 LuCI 页面提交验证码
+swjsq_wait_captcha() {
+	local waited=0 wait_time=300
+	while [ $waited -lt $wait_time ]; do
+		if [ -s "$captcha_code_file" ]; then
+			_log "已收到图形验证码，正在重新登录"
+			return 0
+		fi
+		sleep 1
+		waited=$(( waited + 1 ))
+	done
+	_log "等待输入图形验证码超时" $(( 1 | 8 | 32 ))
+	swjsq_clear_captcha
+	return 1
+}
+
+# 读取 root 专用的登录凭证缓存。缓存与当前配置帐号绑定，不执行文件内容。
+swjsq_load_auth() {
+	[ -s "$auth_file" ] || return 1
+	local saved_userid=$(sed -n '1p' "$auth_file")
+	local saved_loginkey=$(sed -n '2p' "$auth_file")
+	local saved_account=$(sed -n '3p' "$auth_file")
+
+	if [ -z "$saved_userid" -o -n "${saved_userid//[0-9]/}" \
+		-o ${#saved_loginkey} -lt 16 -o ${#saved_loginkey} -gt 256 \
+		-o -n "${saved_loginkey//[0-9A-Za-z._-]/}" \
+		-o "$saved_account" != "$username" ]; then
+		rm -f "$auth_file"
+		return 1
+	fi
+
+	_userid=$saved_userid
+	_loginkey=$saved_loginkey
+	_log "已加载保存的帐号登录凭证" $(( 1 | 4 ))
+	return 0
+}
+
+# 原子保存登录凭证，避免重启服务后再次触发密码登录验证码。
+swjsq_save_auth() {
+	[ -n "$_userid" -a -n "$_loginkey" ] || return 1
+	umask 077
+	{
+		printf '%s\n' "$_userid"
+		printf '%s\n' "$_loginkey"
+		printf '%s\n' "$username"
+	} > "${auth_file}.new" || return 1
+	chmod 600 "${auth_file}.new"
+	mv -f "${auth_file}.new" "$auth_file"
+}
+
+swjsq_clear_auth() {
+	rm -f "$auth_file" "${auth_file}.new" 2>/dev/null
+}
+
 # 帐号登录
 swjsq_login() {
+	local verify_key verify_code used_captcha=0
 	swjsq_json
 	if [ -z "$_userid" -o -z "$_loginkey" ]; then
 		access_url='https://mobile-login.xunlei.com/login'
 		json_add_string userName "$username"
 		json_add_string passWord "$password"
-		json_add_string verifyKey
-		json_add_string verifyCode
+		verify_key=$(cat "$captcha_key_file" 2>/dev/null)
+		verify_code=$(cat "$captcha_code_file" 2>/dev/null)
+		if [ ${#verify_key} -eq 64 -a -n "$verify_code" -a ${#verify_code} -le 8 \
+			-a -z "${verify_code//[0-9A-Za-z]/}" ]; then
+			json_add_string verifyKey "$verify_key"
+			json_add_string verifyCode "$verify_code"
+			used_captcha=1
+		else
+			json_add_string verifyKey
+			json_add_string verifyCode
+		fi
 		json_add_string isMd5Pwd '0'
 	else
 		access_url='https://mobile-login.xunlei.com/loginkey'
@@ -175,8 +279,17 @@ swjsq_login() {
 	fi
 	json_close_object
 
-	local ret=$($_http_cmd --user-agent="$agent_xl" "$access_url" --post-data="$(json_dump)")
-	case $? in
+	local ret http_ret
+	if [ $used_captcha -eq 1 ]; then
+		ret=$($_http_cmd --header="Cookie: VERIFY_KEY=$verify_key" \
+			--user-agent="$agent_xl" "$access_url" --post-data="$(json_dump)")
+		http_ret=$?
+		rm -f "$captcha_code_file"
+	else
+		ret=$($_http_cmd --user-agent="$agent_xl" "$access_url" --post-data="$(json_dump)")
+		http_ret=$?
+	fi
+	case $http_ret in
 		0)
 			_log "login is $ret" $(( 1 | 4 ))
 			json_cleanup; json_load "$ret" >/dev/null 2>&1
@@ -193,10 +306,24 @@ swjsq_login() {
 			json_get_var _loginkey "loginKey"
 			json_get_var _sessionid "sessionID"
 			_log "_sessionid is $_sessionid" $(( 1 | 4 ))
+			swjsq_save_auth
 			local outmsg="帐号登录成功"; _log "$outmsg" $(( 1 | 8 ))
+			swjsq_clear_captcha
+			;;
+		6)
+			local verify_type
+			json_get_var verify_type "verifyType"
+			# loginKey 也被风控时，清除缓存并回退到帐号密码验证码登录。
+			if [ -n "$_userid" -o -n "$_loginkey" ]; then
+				_userid=; _loginkey=
+				swjsq_clear_auth
+			fi
+			if ! swjsq_get_captcha "${verify_type:-MEA}"; then
+				lasterr=-1
+			fi
 			;;
 		15) # 身份信息已失效
-			_userid=; _loginkey=;;
+			_userid=; _loginkey=; swjsq_clear_auth;;
 		-1)
 			local outmsg="帐号登录失败。迅雷服务器未响应，请稍候"; _log "$outmsg";;
 		-2)
@@ -589,6 +716,7 @@ xlnetacc_logout() {
 sigterm() {
 	_log "trap sigterm, exit" $(( 1 | 4 ))
 	xlnetacc_logout
+	swjsq_clear_captcha
 	rm -f "$down_state_file" "$up_state_file"
 	exit 0
 }
@@ -608,6 +736,10 @@ xlnetacc_init() {
 	readonly LOGFILE=/var/log/${NAME}.log
 	readonly down_state_file=/var/state/${NAME}_down_state
 	readonly up_state_file=/var/state/${NAME}_up_state
+	readonly captcha_image_file=/tmp/${NAME}_verify.jpg
+	readonly captcha_key_file=/tmp/${NAME}_verify_key
+	readonly captcha_code_file=/tmp/${NAME}_verify_code
+	readonly auth_file=/etc/${NAME}.auth
 	down_acc=$(uci_get_by_bool "general" "down_acc" 0)
 	up_acc=$(uci_get_by_bool "general" "up_acc" 0)
 	readonly logging=$(uci_get_by_bool "general" "logging" 1)
@@ -617,8 +749,10 @@ xlnetacc_init() {
 	relogin=$(uci_get_by_name "general" "relogin" 0)
 	readonly username=$(uci_get_by_name "general" "account")
 	readonly password=$(uci_get_by_name "general" "password")
+	swjsq_load_auth
 	local enabled=$(uci_get_by_bool "general" "enabled" 0)
-	([ $enabled -eq 0 ] || [ $down_acc -eq 0 -a $up_acc -eq 0 ] || [ -z "$username" -o -z "$password" -o -z "$network" ]) && return 2
+	([ $enabled -eq 0 ] || [ $down_acc -eq 0 -a $up_acc -eq 0 ] \
+		|| [ -z "$username" -o -z "$network" ] || [ -z "$password" -a -z "$_loginkey" ]) && return 2
 	([ -z "$keepalive" -o -n "${keepalive//[0-9]/}" ] || [ $keepalive -lt 5 -o $keepalive -gt 60 ]) && keepalive=10
 	readonly keepalive=$(( $keepalive ))
 	([ -z "$relogin" -o -n "${relogin//[0-9]/}" ] || [ $relogin -gt 48 ]) && relogin=0
@@ -644,6 +778,7 @@ xlnetacc_init() {
 
 	clean_log
 	[ -d /var/state ] || mkdir -p /var/state
+	swjsq_clear_captcha
 	rm -f "$down_state_file" "$up_state_file"
 	return 0
 }
@@ -667,7 +802,7 @@ xlnetacc_main() {
 				-1) sleep 5s;; # 服务器未响应
 				-2) return 7;; # Wget 参数解析错误
 				-3) sleep 3s;; # Wget 网络通信失败
-				6) sleep 130m;; # 需要输入验证码
+				6) swjsq_wait_captcha || return 5;; # 等待页面输入验证码
 				8) sleep 3m;; # 服务器系统维护
 				15) sleep 1s;; # 身份信息已失效
 				*) return 5;; # 登录失败

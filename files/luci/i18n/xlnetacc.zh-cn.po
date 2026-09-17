@@ -105,3 +105,36 @@ msgstr "无日志数据。"
 
 msgid "Error get log data."
 msgstr "获取日志数据失败。"
+
+msgid "Login verification"
+msgstr "登录验证"
+
+msgid "Thunder requires a graphical captcha. Enter the characters shown below to continue logging in."
+msgstr "迅雷要求输入图形验证码，请输入下图字符以继续登录。"
+
+msgid "Captcha"
+msgstr "验证码"
+
+msgid "Reload image"
+msgstr "重新加载图片"
+
+msgid "Submit captcha"
+msgstr "提交验证码"
+
+msgid "Submitting..."
+msgstr "正在提交……"
+
+msgid "Please submit the captcha from the page."
+msgstr "请从页面提交验证码。"
+
+msgid "The captcha has expired. Please wait for a new one."
+msgstr "验证码已过期，请等待生成新的验证码。"
+
+msgid "Enter 4 to 8 letters or numbers."
+msgstr "请输入 4 至 8 位字母或数字。"
+
+msgid "Unable to submit the captcha."
+msgstr "验证码提交失败。"
+
+msgid "Captcha submitted. Logging in..."
+msgstr "验证码已提交，正在登录……"
