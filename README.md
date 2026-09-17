@@ -21,3 +21,18 @@
 
 建议将“保持连接周期”设为 10 分钟，并将“账号重新登录”设为“未启用”，
 避免不必要的定时重新登录触发验证码。
+
+## 安装
+
+从 [Releases](https://github.com/leologoli/luci-app-xlnetacc/releases) 下载最新的
+`luci-app-xlnetacc_*_all.ipk`，上传到路由器后执行：
+
+```sh
+opkg install --force-reinstall /tmp/luci-app-xlnetacc_*_all.ipk
+rm -f /tmp/luci-indexcache
+rm -rf /tmp/luci-modulecache
+/etc/init.d/xlnetacc restart
+```
+
+GitHub Actions 会在推送 `v*` 标签或手动运行 “Build and release IPK” 时，
+使用 OpenWrt 23.05.5 SDK 构建并发布 IPK 及 SHA-256 校验文件。
